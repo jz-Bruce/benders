@@ -1,0 +1,84 @@
+from gurobipy import *
+
+MP = Model("MP")
+y = MP.addVar(lb=0, ub=1000, vtype=GRB.INTEGER, name='y')
+q = MP.addVar(lb=0, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS, name='q')
+z = MP.addVar(lb=0, vtype=GRB.CONTINUOUS, name='z')
+MP.setObjective(z, GRB.MAXIMIZE)
+MP.addConstr(z == q + 1.045 * y)
+MP.addConstr(z <= 1e6, name="init_cut")
+MP.Params.LazyConstraints = 1
+
+MP._last_dual_sp = None
+MP._last_y = None
+
+
+def benders_callback(model, where):
+    if where == GRB.Callback.MIPSOL:
+        y_val = model.cbGetSolution(y)
+        z_val = model.cbGetSolution(z)
+
+        Dual_SP = Model()
+        Dual_SP.setParam('OutputFlag', 0)
+        Dual_SP.setParam('InfUnbdInfo', 1)
+
+        alpha_0 = Dual_SP.addVar(lb=0, name='alpha_0')
+        alpha = {i: Dual_SP.addVar(lb=0, name=f'alpha_{i}') for i in range(1, 11)}
+
+        obj = LinExpr()
+        obj.addTerms(1000 - y_val, alpha_0)
+        for i in range(1, 11):
+            obj.addTerms(100, alpha[i])
+        Dual_SP.setObjective(obj, GRB.MINIMIZE)
+
+        for i in range(1, 11):
+            Dual_SP.addConstr(alpha_0 + alpha[i] >= 1 + 0.01 * i)
+
+        Dual_SP.optimize()
+
+        # 存储
+        model._last_dual_sp = Dual_SP
+        model._last_y = y_val
+
+        if Dual_SP.status == GRB.OPTIMAL:
+            rhs_val = (1000 - y_val) * alpha_0.x
+            for i in range(1, 11):
+                rhs_val += 100 * alpha[i].x
+
+            rhs_expr = (1000 - y) * alpha_0.x + 1.045 * y
+            for i in range(1, 11):
+                rhs_expr += 100 * alpha[i].x
+
+            if z_val > rhs_val + 1e-6:
+                model.cbLazy(z <= rhs_expr)
+
+        elif Dual_SP.status == GRB.UNBOUNDED:
+            ray0 = alpha_0.UnbdRay
+            ray = {i: alpha[i].UnbdRay for i in range(1, 11)}
+            expr = (1000 - y) * ray0
+            for i in range(1, 11):
+                expr += 100 * ray[i]
+            model.cbLazy(expr >= 0)
+
+
+MP.optimize(benders_callback)
+
+print("\n===== Final Solution =====")
+if MP.status == GRB.OPTIMAL:
+    print(f"Obj = {MP.ObjVal:.4f}")
+    print(f"y = {y.x:.4f}")
+    print(f"z = {z.x:.4f}")
+
+    gap = abs(MP.ObjVal - MP.ObjBound)
+    if gap < 1e-6 and hasattr(MP, '_last_dual_sp'):
+        print(f"\n收敛! UB=LB={MP.ObjVal:.4f}")
+        print("最终对偶信息:")
+        print("x_i = [", end="")
+        cnt = 0
+        for con in MP._last_dual_sp.getConstrs():
+            if cnt > 0: print(", ", end="")
+            print(f"{con.Pi:.4f}", end="")
+            cnt += 1
+        print("]")
+else:
+    print("No optimal solution found.")
