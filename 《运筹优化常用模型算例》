@@ -1,0 +1,101 @@
+from gurobipy import *
+
+MP=Model("MP")
+y_vars = {i: MP.addVar(vtype=GRB.BINARY, name='y' + str(i)) for i in range(1, 6)}
+q = MP.addVar(0,ub=GRB.INFINITY,vtype=GRB.CONTINUOUS,name = 'q')
+z = MP.addVar(0,ub=GRB.INFINITY,vtype=GRB.CONTINUOUS,name = 'z')
+MP.setObjective(z, GRB.MINIMIZE)
+MP.addConstr(z == q + 7 * y_vars[1] + 7 * y_vars[2] + 7 * y_vars[3] + 7 * y_vars[4] + 7 * y_vars[5], name='constraint_1')
+
+MP.Params.LazyConstraints = 1
+
+def benders_callback(model, where):
+    if where  ==  GRB.Callback.MIPSOL:
+        y_val = {i: model.cbGetSolution(y_vars[i]) for i in range(1, 6)}
+        q_val = model.cbGetSolution(q)
+        z_val = model.cbGetSolution(z)
+
+        Dual_SP = Model()
+        Dual_SP.setParam('OutputFlag', 0)
+        Dual_SP.setParam('InfUnbdInfo', 1)
+
+        alpha = {i:Dual_SP.addVar(lb=-GRB.INFINITY,ub=GRB.INFINITY,vtype=GRB.CONTINUOUS,name='alpha'+str(i)) for i in range(1,4)}
+        beta = {i:Dual_SP.addVar(lb=-GRB.INFINITY,ub=0, vtype=GRB.CONTINUOUS,name='beta'+str(i)) for i in range(1,6)}
+
+        obj = LinExpr()
+        obj.addTerms(8, alpha[1])
+        obj.addTerms(3, alpha[2])
+        obj.addTerms(5, alpha[3])
+        obj.addTerms(8 * y_val[1], beta[1])
+        obj.addTerms(3 * y_val[2], beta[2])
+        obj.addTerms(5 * y_val[3], beta[3])
+        obj.addTerms(5 * y_val[4], beta[4])
+        obj.addTerms(5 * y_val[5], beta[5])
+
+        Dual_SP.setObjective(obj, GRB.MAXIMIZE)
+
+        Dual_SP.addConstr(alpha[1]+beta[1]<=1,name='constraint_1')
+        Dual_SP.addConstr(alpha[2]+beta[2]<=1,name='constraint_2')
+        Dual_SP.addConstr(alpha[3]+beta[3]<=1,name='constraint_3')
+        Dual_SP.addConstr(alpha[1]+alpha[3]+beta[4]<=1,name='constraint_4')
+        Dual_SP.addConstr(alpha[1]+alpha[2]+beta[5]<=1,name='constraint_5')
+
+        Dual_SP.optimize()
+
+        if Dual_SP.status == GRB.OPTIMAL:
+            rhs_val = 0
+            rhs_val+= 8 * alpha[1].x + 3 * alpha[2].x + 5 * alpha[3].x + 8 * y_val[1] * beta[1].x + 3 * y_val[2] * beta[2].x + 5 * y_val[3] * beta[3].x + 5 * y_val[4] * beta[4].x + 5 * y_val[5] * beta[5].x
+
+            rhs_expr = 0
+            rhs_expr += 8 * alpha[1].x + 3 * alpha[2].x + 5 * alpha[3].x + 8 * y_vars[1] * beta[1].x + 3 * y_vars[2] * beta[2].x + 5 * y_vars[3] * beta[3].x + 5 * y_vars[4] * beta[4].x + 5 * y_vars[5] * beta[5].x
+
+            if q_val < rhs_val - 1e-6:
+                model.cbLazy(q >= rhs_expr)
+        elif Dual_SP.status == GRB.UNBOUNDED:
+            ray_alpha = {i: alpha[i].UnbdRay for i in range(1, 4)}
+            ray_beta = {i: beta[i].UnbdRay for i in range(1, 6)}
+
+            # 构建可行性割表达式
+            feas_expr = LinExpr()
+            # 常数项
+            const = 8 * ray_alpha[1] + 3 * ray_alpha[2] + 5 * ray_alpha[3]
+            feas_expr.addConstant(const)
+            # 变量项
+            feas_expr.addTerms(8 *ray_beta[1] , y_vars[1])
+            feas_expr.addTerms(3 * ray_beta[2] , y_vars[2])
+            feas_expr.addTerms(5 * ray_beta[3] , y_vars[3])
+            feas_expr.addTerms(5 * ray_beta[4] , y_vars[4])
+            feas_expr.addTerms(5 * ray_beta[5] , y_vars[5])
+
+            model.cbLazy(feas_expr <= 0)
+
+MP.optimize(benders_callback)
+
+if MP.status == GRB.OPTIMAL:
+    print("=" * 50)
+    print("Benders分解求解结果")
+    print("=" * 50)
+    print(f"最优目标值: {MP.ObjVal:.4f}")
+    print(f"\n决策变量值:")
+    for i in range(1, 6):
+        print(f"  y{i} = {y_vars[i].X:.0f}")
+    print(f"  q = {q.X:.4f}")
+    print(f"  z = {z.X:.4f}")
+
+    print(f"\n收敛信息:")
+    print(f"  上界(UB) = {MP.ObjVal:.4f}")
+    print(f"  下界(LB) = {MP.ObjBound:.4f}")
+    gap = abs(MP.ObjVal - MP.ObjBound)
+    print(f"  间隙(Gap) = {gap:.6f}")
+
+    if gap < 1e-4:
+        print(f"  ✓ 已收敛!")
+    else:
+        print(f"  ⚠ 未完全收敛")
+
+elif MP.status == GRB.INFEASIBLE:
+    print("模型不可行!")
+elif MP.status == GRB.UNBOUNDED:
+    print("模型无界!")
+else:
+    print(f"求解状态: {MP.status}")
